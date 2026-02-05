@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Lockfiles (keep one; uncomment if you want to ignore the other)
+# package-lock.json
+# bun.lock
+# yarn.lock
+# pnpm-lock.yaml
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Env (secrets)
+.env
+.env.local
+.env.*.local
+
+# Test / Coverage
+coverage/
+.nyc_output/
+
+# Misc
+*.tsbuildinfo
