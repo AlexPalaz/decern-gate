@@ -1,6 +1,6 @@
 # decern-gate
 
-CLI that gates high-impact changes in CI: if your diff touches migrations, infra, or lockfiles, the pipeline requires a reference to an **approved** [Decern](https://github.com/your-org/decern) decision (e.g. in the PR description or commit message). Works on any CI using only **git** and **env vars** (GitHub Actions, GitLab CI, Jenkins, Bitbucket, Azure DevOps).
+CLI that gates high-impact changes in CI: if your diff touches migrations, infra, or lockfiles, the pipeline requires a reference to an **approved** decision (e.g. in the PR description or commit message). Works on any CI using only **git** and **env vars** (GitHub Actions, GitLab CI, Jenkins, Bitbucket, Azure DevOps).
 
 ## Usage (local)
 
