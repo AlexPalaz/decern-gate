@@ -118,7 +118,7 @@ function getPrOrCommitText(): string {
 // --- Validate: call API ---
 
 type ValidateResult =
-  | { ok: true; observationOnly?: boolean }
+  | { ok: true; decisionStatus?: string; hasLinkedPR?: boolean }
   | { ok: false; status: number; reason: string; body?: unknown };
 
 async function validateRef(ref: string): Promise<ValidateResult> {
@@ -146,13 +146,16 @@ async function validateRef(ref: string): Promise<ValidateResult> {
 
     const body = (await res.json().catch(() => ({}))) as {
       valid?: boolean;
-      /** true when on free plan: gate passes but decision is not enforced as approved */
-      observationOnly?: boolean;
       reason?: string;
       status?: string;
+      hasLinkedPR?: boolean;
     };
     if (res.status === 200 && body.valid === true) {
-      return { ok: true, observationOnly: body.observationOnly === true };
+      return {
+        ok: true,
+        decisionStatus: body.status,
+        hasLinkedPR: body.hasLinkedPR,
+      };
     }
     const rawReason = body.reason ?? `HTTP ${res.status}`;
     const reason = rawReason.startsWith("HTTP ") ? rawReason : formatLabel(rawReason);
@@ -265,15 +268,16 @@ export async function run(): Promise<number> {
   for (const id of ids) {
     const result = await validateRef(id);
     if (result.ok) {
-      if (result.observationOnly) {
-        log(`Decision ${id}: observation only (status: observation_only — gate passes)`);
-        log("");
-        log("Free plan: observation only — decision is proposed, not approved. Upgrade to Team for enforcement.");
-        log("");
-        log("Gate: passed (observation only).");
-        return 0;
+      const statusLabel =
+        result.decisionStatus != null ? formatLabel(result.decisionStatus) : null;
+      if (statusLabel != null) {
+        log(`Decision ${id}: status ${statusLabel}.`);
+      } else {
+        log(`Decision ${id}: valid.`);
       }
-      log(`Decision ${id}: approved.`);
+      if (result.hasLinkedPR != null) {
+        log(`Linked PR: ${result.hasLinkedPR ? "yes" : "no"}.`);
+      }
       log("");
       log("Gate: passed.");
       return 0;
@@ -282,7 +286,7 @@ export async function run(): Promise<number> {
   }
 
   log("");
-  log("Gate: blocked — no referenced decision is approved.");
+  log("Gate: blocked — no referenced decision is valid.");
   log("");
   log("Ensure the decision is approved in Decern, or add a reference to an approved decision (decision ID or ADR-XXX in PR/commit).");
   if (DECERN_BASE_URL) {
