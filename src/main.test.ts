@@ -18,6 +18,14 @@ describe("extractDecisionIds", () => {
   it('"https://x.y/decisions/kkk-111" -> contains "kkk-111"', () => {
     expect(extractDecisionIds("https://x.y/decisions/kkk-111")).toContain("kkk-111");
   });
+
+  it("extracts ADR refs (e.g. ADR-001, ADR-123)", () => {
+    expect(extractDecisionIds("See ADR-001 for context")).toContain("ADR-001");
+    expect(extractDecisionIds("decern:ADR-042")).toContain("ADR-042");
+    expect(extractDecisionIds("Implements ADR-123 and ADR-456")).toEqual(
+      expect.arrayContaining(["ADR-123", "ADR-456"])
+    );
+  });
 });
 
 describe("isDecisionRequired", () => {

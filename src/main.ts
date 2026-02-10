@@ -31,16 +31,21 @@ export function isDecisionRequired(changedFiles: string[]): { required: true; re
   return { required: false, reason: "No high-impact file patterns matched." };
 }
 
-// --- Extract decision IDs from text (PR description / commit message) ---
+// --- Extract decision IDs and ADR refs from text (PR description / commit message) ---
 
 const DECERN_PREFIX = /decern:\s*([a-zA-Z0-9_-]+)/gi;
 const DECERN_TICKET = /DECERN-([a-zA-Z0-9_-]+)/g;
 const DECISIONS_URL = /\/decisions\/([a-zA-Z0-9_-]+)/g;
+/** Standalone ADR refs (e.g. ADR-001, ADR-123) */
+const ADR_REF = /\b(ADR-[a-zA-Z0-9_-]+)\b/gi;
+
+/** ADR ref (e.g. ADR-001); anything else is treated as decision ID (e.g. UUID). */
+const ADR_REF_REGEX = /^ADR-[a-zA-Z0-9_-]+$/i;
 
 export function extractDecisionIds(text: string): string[] {
   if (!text || typeof text !== "string") return [];
   const ids = new Set<string>();
-  for (const re of [DECERN_PREFIX, DECERN_TICKET, DECISIONS_URL]) {
+  for (const re of [DECERN_PREFIX, DECERN_TICKET, DECISIONS_URL, ADR_REF]) {
     re.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = re.exec(text)) !== null) {
@@ -48,6 +53,11 @@ export function extractDecisionIds(text: string): string[] {
     }
   }
   return [...ids];
+}
+
+/** Returns whether the ref is an ADR ref (e.g. ADR-001); otherwise treated as decision ID (UUID). */
+function isAdrRef(ref: string): boolean {
+  return ADR_REF_REGEX.test(ref.trim());
 }
 
 // --- Git: changed files ---
@@ -111,14 +121,18 @@ type ValidateResult =
   | { ok: true; observationOnly?: boolean }
   | { ok: false; status: number; reason: string; body?: unknown };
 
-async function validateDecision(decisionId: string): Promise<ValidateResult> {
+async function validateRef(ref: string): Promise<ValidateResult> {
   if (!DECERN_BASE_URL || !DECERN_CI_TOKEN) {
     return { ok: false, status: 0, reason: "DECERN_BASE_URL and DECERN_CI_TOKEN are required." };
   }
 
   const base = DECERN_BASE_URL.replace(/\/$/, "");
   const url = new URL(VALIDATE_PATH.startsWith("/") ? VALIDATE_PATH : `/${VALIDATE_PATH}`, `${base}/`);
-  url.searchParams.set("decisionId", decisionId);
+  if (isAdrRef(ref)) {
+    url.searchParams.set("adrRef", ref.trim());
+  } else {
+    url.searchParams.set("decisionId", ref.trim());
+  }
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), DECERN_GATE_TIMEOUT_MS);
 
@@ -228,13 +242,13 @@ export async function run(): Promise<number> {
   const text = getPrOrCommitText();
   const ids = extractDecisionIds(text);
 
-  log(`References: found ${ids.length} decision ref(s) in PR/commit — ${ids.length > 0 ? ids.join(", ") : "none"}`);
+  log(`References: found ${ids.length} ref(s) (decision ID or ADR) — ${ids.length > 0 ? ids.join(", ") : "none"}`);
 
   if (ids.length === 0) {
     log("");
     log("Gate: blocked — high-impact change detected.");
     log("");
-    log("Add a Decern decision reference to the PR description or commit message (e.g. decern:<id>, DECERN-<id>, or link to /decisions/<id>). The decision must be approved in Decern before merge.");
+    log("Add a Decern reference to the PR description or commit message: decision ID (decern:<uuid>, /decisions/<id>) or ADR ref (e.g. ADR-001). The decision must be approved in Decern before merge.");
     if (DECERN_BASE_URL) {
       log(`Dashboard: ${DECERN_BASE_URL}`);
     }
@@ -249,7 +263,7 @@ export async function run(): Promise<number> {
 
   log("");
   for (const id of ids) {
-    const result = await validateDecision(id);
+    const result = await validateRef(id);
     if (result.ok) {
       if (result.observationOnly) {
         log(`Decision ${id}: observation only (status: observation_only — gate passes)`);
@@ -270,7 +284,7 @@ export async function run(): Promise<number> {
   log("");
   log("Gate: blocked — no referenced decision is approved.");
   log("");
-  log("Ensure the decision is approved in Decern, or add a reference to an approved decision (decern:<id> in PR/commit).");
+  log("Ensure the decision is approved in Decern, or add a reference to an approved decision (decision ID or ADR-XXX in PR/commit).");
   if (DECERN_BASE_URL) {
     log(`Dashboard: ${DECERN_BASE_URL}`);
   }
