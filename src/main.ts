@@ -4,6 +4,7 @@
  */
 
 import { execSync } from "child_process";
+import { getBaseAndHead, getDiffForJudge } from "./judge-diff.js";
 import { pathMatchesRequired } from "./required-patterns.js";
 
 // --- Config from env (never log DECERN_CI_TOKEN) ---
@@ -22,6 +23,15 @@ const CI_PR_BODY = process.env.CI_PR_BODY?.trim();
 const CI_COMMIT_MESSAGE = process.env.CI_COMMIT_MESSAGE?.trim();
 
 const VALIDATE_PATH = process.env.DECERN_VALIDATE_PATH?.trim() || "/api/decision-gate/validate";
+const JUDGE_PATH = process.env.DECERN_JUDGE_PATH?.trim() || "/api/decision-gate/judge";
+const DECERN_GATE_JUDGE_TIMEOUT_MS = Math.max(
+  5000,
+  parseInt(process.env.DECERN_GATE_JUDGE_TIMEOUT_MS ?? "60000", 10) || 60000
+);
+/** When true or 1, judge step runs after validate (CLI calls /judge with diff and decision ref). Default: disabled. */
+const DECERN_GATE_JUDGE_ENABLED =
+  process.env.DECERN_GATE_JUDGE_ENABLED?.toLowerCase() === "true" ||
+  process.env.DECERN_GATE_JUDGE_ENABLED === "1";
 
 /** When true, gate blocks unless the decision has the current PR linked in Decern (requires API to return hasLinkedPR). */
 const DECERN_GATE_REQUIRE_LINKED_PR =
@@ -71,32 +81,90 @@ function isAdrRef(ref: string): boolean {
   return ADR_REF_REGEX.test(ref.trim());
 }
 
+// --- Judge: call API (after validate passes) ---
+
+type JudgeResult =
+  | { ok: true; allowed: true; reason?: string }
+  | { ok: true; allowed: false; reason: string }
+  | { ok: false; status: number; reason: string };
+
+async function callJudge(params: {
+  decisionRef: string;
+  diff: string;
+  truncated: boolean;
+  baseSha: string;
+  headSha: string;
+}): Promise<JudgeResult> {
+  if (!DECERN_BASE_URL || !DECERN_CI_TOKEN) {
+    return { ok: false, status: 0, reason: "DECERN_BASE_URL and DECERN_CI_TOKEN are required." };
+  }
+
+  const base = DECERN_BASE_URL.replace(/\/$/, "");
+  const url = new URL(JUDGE_PATH.startsWith("/") ? JUDGE_PATH : `/${JUDGE_PATH}`, `${base}/`);
+
+  const body: Record<string, unknown> = {
+    diff: params.diff,
+    truncated: params.truncated,
+    baseSha: params.baseSha,
+    headSha: params.headSha,
+  };
+  if (isAdrRef(params.decisionRef)) {
+    body.adrRef = params.decisionRef.trim();
+  } else {
+    body.decisionId = params.decisionRef.trim();
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), DECERN_GATE_JUDGE_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(url.toString(), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${DECERN_CI_TOKEN}`,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    const data = (await res.json().catch(() => ({}))) as {
+      allowed?: boolean;
+      reason?: string;
+    };
+
+    if (res.status !== 200) {
+      const reason = data.reason ?? `HTTP ${res.status}`;
+      return { ok: false, status: res.status, reason };
+    }
+
+    if (data.allowed === true) {
+      return { ok: true, allowed: true, reason: data.reason };
+    }
+    return {
+      ok: true,
+      allowed: false,
+      reason: data.reason ?? "Judge did not allow the change.",
+    };
+  } catch (e) {
+    clearTimeout(timeoutId);
+    if (e instanceof Error && e.name === "AbortError") {
+      return {
+        ok: false,
+        status: 0,
+        reason: `Judge request timeout after ${DECERN_GATE_JUDGE_TIMEOUT_MS}ms.`,
+      };
+    }
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, status: 0, reason: `Judge network error: ${msg}.` };
+  }
+}
+
 // --- Git: changed files ---
 
 function getChangedFiles(): string[] {
-  let base = "";
-  let head = "";
-
-  if (CI_BASE_SHA && CI_HEAD_SHA) {
-    base = CI_BASE_SHA;
-    head = CI_HEAD_SHA;
-  } else {
-    try {
-      execSync("git rev-parse --verify origin/main", { stdio: "pipe" });
-      base = "origin/main";
-      head = "HEAD";
-    } catch {
-      try {
-        execSync("git rev-parse --verify origin/master", { stdio: "pipe" });
-        base = "origin/master";
-        head = "HEAD";
-      } catch {
-        base = "HEAD~1";
-        head = "HEAD";
-      }
-    }
-  }
-
+  const { base, head } = getBaseAndHead(CI_BASE_SHA, CI_HEAD_SHA);
   const out = execSync(`git diff --name-only ${base}...${head}`, {
     encoding: "utf-8",
     maxBuffer: 4 * 1024 * 1024,
@@ -309,6 +377,47 @@ export async function run(): Promise<number> {
         }
       }
 
+      // Validate passed. Optionally run judge (LLM: diff vs decision).
+      if (!DECERN_GATE_JUDGE_ENABLED) {
+        log("");
+        log("Gate: passed.");
+        return 0;
+      }
+
+      const lastRef = ids[ids.length - 1]!;
+      log("");
+      log(`Judge: checking diff against decision ${lastRef}...`);
+
+      const { base: diffBase, head: diffHead } = getBaseAndHead(CI_BASE_SHA, CI_HEAD_SHA);
+      const judgeDiffResult = getDiffForJudge(diffBase, diffHead);
+
+      if (judgeDiffResult.excludedFiles.length > 0) {
+        log(`Warning: the following files were not included in the judge (image, binary, or >1MB): ${formatFileList(judgeDiffResult.excludedFiles)}`);
+      }
+      if (judgeDiffResult.truncated) {
+        log("Warning: diff was truncated to 2MB; judge is based on partial diff.");
+      }
+
+      const judgeResult = await callJudge({
+        decisionRef: lastRef,
+        diff: judgeDiffResult.diff,
+        truncated: judgeDiffResult.truncated,
+        baseSha: judgeDiffResult.base,
+        headSha: judgeDiffResult.head,
+      });
+
+      if (!judgeResult.ok) {
+        log("");
+        log(`Gate: blocked — judge request failed: ${judgeResult.reason}`);
+        return 1;
+      }
+      if (!judgeResult.allowed) {
+        log("");
+        log(`Gate: blocked — judge: ${judgeResult.reason}`);
+        return 1;
+      }
+
+      log(`Judge: allowed. ${judgeResult.reason ? judgeResult.reason : ""}`);
       log("");
       log("Gate: passed.");
       return 0;

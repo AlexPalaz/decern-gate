@@ -44,6 +44,9 @@ npx decern-gate
 | `CI_PR_TITLE` | No | PR/MR title; used to extract `decern:<id>` if set. |
 | `CI_PR_BODY` | No | PR/MR description; used to extract decision refs. |
 | `CI_COMMIT_MESSAGE` | No | Full commit message; used if PR vars are not set. |
+| `DECERN_GATE_JUDGE_ENABLED` | No | When `true` or `1`, the judge step runs after validate. Default: disabled. Set to `true` once your Decern backend exposes the judge endpoint. |
+| `DECERN_JUDGE_PATH` | No | Path to the judge endpoint. Default: `/api/decision-gate/judge`. |
+| `DECERN_GATE_JUDGE_TIMEOUT_MS` | No | Timeout for the judge API call in ms. Default: `60000`. |
 
 If `CI_BASE_SHA` and `CI_HEAD_SHA` are not set, the CLI tries `origin/main...HEAD`, then `origin/master...HEAD`, then `HEAD~1...HEAD`.
 
@@ -86,10 +89,100 @@ Response when approved: `200` with `{"valid":true,"decisionId":"...","status":"a
 
 1. **Changed files** — `git diff --name-only base...head`.
 2. **Policy** — If any file matches high-impact patterns (migrations, Dockerfile, lockfiles, workflows, etc.), a decision is **required**.
-3. **Extract refs** — From PR title/body or commit message: `decern:<id>`, `DECERN-<id>`, or URLs containing `/decisions/<id>`.
-4. **Validate** — Calls `GET ${DECERN_BASE_URL}/api/decision-gate/validate?decisionId=<id>` with `Authorization: Bearer ${DECERN_CI_TOKEN}`. First approved decision wins; otherwise exit 1.
+3. **Extract refs** — From PR title/body or commit message: `decern:<id>`, `DECERN-<id>`, or URLs containing `/decisions/<id>`. If multiple refs are present, only the **last** one is used for the judge step.
+4. **Validate** — Calls `GET ${DECERN_BASE_URL}/api/decision-gate/validate?decisionId=<id>` (or `adrRef=...`) with `Authorization: Bearer ${DECERN_CI_TOKEN}`. If no referenced decision is approved, the gate blocks and the judge step is **not** run.
+5. **Judge** (optional, when `DECERN_GATE_JUDGE_ENABLED` is set to `true`) — After validate passes, calls `POST ${DECERN_BASE_URL}${DECERN_JUDGE_PATH}` with the **full diff** (subject to exclusions and a 2MB cap; see [Judge (LLM as a judge)](#judge-llm-as-a-judge)) and the single decision ref (ADR or decision ID). The backend uses an LLM to decide whether the diff is consistent with the decision. If the judge does not allow the change, the gate blocks.
 
 **Fail-closed:** Timeout, network error, or 5xx → exit 1. Never log the token.
+
+## Trunk-based development
+
+decern-gate works with a **trunk-based** workflow (single main branch, direct pushes or short-lived branches) **only if CI passes explicit refs**.
+
+- **With `CI_BASE_SHA` and `CI_HEAD_SHA` set** — It works as intended. Configure CI so that:
+  - **Base** = commit before the push (e.g. previous main tip or `GIT_PREVIOUS_COMMIT`)
+  - **Head** = current commit (e.g. `GIT_COMMIT` or `HEAD`)
+
+  The Jenkins example in [CI examples](#ci-examples) already does this for pushes to main: `CI_BASE_SHA="${GIT_PREVIOUS_COMMIT:-origin/main}"` and `CI_HEAD_SHA="${GIT_COMMIT}"`. The diff is then “what this push changed” and the gate applies correctly.
+
+- **Without `CI_BASE_SHA` / `CI_HEAD_SHA` (fallback only)** — Behavior is wrong for direct pushes to main. The fallback uses `origin/main...HEAD` (or `origin/master...HEAD`). On a direct push to main, after the push `origin/main` and `HEAD` are the same commit, so the diff is empty → no changed files → the gate always passes and never checks decisions.
+
+**Summary:** Use trunk-based with decern-gate by having CI set `CI_BASE_SHA` and `CI_HEAD_SHA` (e.g. previous commit vs current commit). Relying on the default fallback is not suitable for direct pushes to main.
+
+## Judge (LLM as a judge)
+
+When validate passes and the judge is **enabled** (`DECERN_GATE_JUDGE_ENABLED=true`), the CLI calls a **judge** endpoint so that the Decern backend (or your service) uses an LLM to check whether the **diff is consistent with** the referenced decision. The judge is **disabled by default**; the judge runs only after validate, and if validate fails, the CI is blocked and the judge is never called.
+
+### Flow
+
+1. **Validate** — High-impact change detected and at least one decision ref present. CLI calls validate; if `valid` is not `true`, gate blocks and **judge is not called**.
+2. **Build diff** — CLI builds the full `git diff base...head` with exclusions and cap (see below).
+3. **Call judge** — `POST` to `DECERN_JUDGE_PATH` with the payload below. One decision only: if multiple refs were found (e.g. ADR-001 and ADR-002), the **last** one (e.g. ADR-002) is sent.
+4. **Result** — Backend returns `allowed: true` or `allowed: false` with optional `reason`. Gate passes only when `allowed === true`.
+
+### Payload sent to the judge API
+
+`POST ${DECERN_BASE_URL}${DECERN_JUDGE_PATH}` with:
+
+- **Headers:** `Content-Type: application/json`, `Authorization: Bearer ${DECERN_CI_TOKEN}`.
+- **Body (JSON):**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `diff` | string | Full unified diff (`git diff base...head`), with exclusions applied and total size capped at **2 MB**. |
+| `truncated` | boolean | `true` if the diff was truncated to 2 MB (backend may treat as partial context). |
+| `baseSha` | string | Git base ref used for the diff (e.g. `origin/main` or a commit SHA). |
+| `headSha` | string | Git head ref (e.g. `HEAD` or a commit SHA). |
+| `adrRef` | string | **Exactly one of** `adrRef` or `decisionId` is present. ADR reference (e.g. `ADR-002`). |
+| `decisionId` | string | Decision UUID when the ref is not an ADR. |
+
+**Exclusions applied by the CLI before sending:**
+
+- **Images and heavy assets** — Files with extensions such as `.png`, `.jpg`, `.gif`, `.webp`, `.svg`, `.mp4`, `.pdf`, `.woff2`, etc. are **excluded** from the diff. The CLI logs a warning listing these paths; they are not sent to the backend and are not judged.
+- **Per-file size** — If one file’s diff (patch) is larger than **1 MB**, that file’s diff is excluded and a warning is logged.
+- **Total size** — The concatenated diff sent in `diff` is at most **2 MB**. If the total would exceed 2 MB, the CLI truncates and sets `truncated: true`.
+
+Example request body:
+
+```json
+{
+  "diff": "diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n ...",
+  "truncated": false,
+  "baseSha": "origin/main",
+  "headSha": "HEAD",
+  "adrRef": "ADR-002"
+}
+```
+
+### Response expected from the judge API
+
+- **Status:** `200 OK`.
+- **Body (JSON):**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `allowed` | boolean | `true` if the change is considered consistent with the decision; `false` to block the gate. |
+| `reason` | string (optional) | Short explanation (e.g. for logs or CI output). |
+
+Example success: `{"allowed": true, "reason": "Change aligns with ADR-002."}`  
+Example block: `{"allowed": false, "reason": "Diff introduces a new DB column not mentioned in the decision."}`
+
+On non-2xx or network error, the CLI treats the judge as failed and **blocks** the gate (fail-closed).
+
+### Backend implementation guide (Decern or your service)
+
+The endpoint that receives the judge payload should:
+
+1. **Authenticate** — Verify `Authorization: Bearer <DECERN_CI_TOKEN>`.
+2. **Resolve the decision** — Using `adrRef` or `decisionId`, load the decision content (title, body, conclusion) from your store.
+3. **Run the LLM judge** — Prompt the model with the decision text and the `diff`. Ask for a structured verdict: e.g. “Is this diff consistent with and justified by this decision? Reply with JSON: `{\"allowed\": true|false, \"reason\": \"...\"}`.”
+4. **Handle large diffs** — The payload is already capped at 2 MB and may be marked `truncated: true`. Recommended strategies:
+   - **Single-shot with truncation:** If the diff fits your model’s context window, send it as-is. If `truncated` is true, you may add a note in the prompt that the diff was truncated.
+   - **Summarize then judge:** If the diff is very long, first call the LLM to produce a short summary (files changed, nature of changes), then a second call to judge “decision + summary” and return `allowed` + `reason`.
+   - **Fail-closed** — On LLM timeout, error, or invalid response, return `allowed: false` with a reason (e.g. “Judge unavailable”).
+5. **Return** — Respond with `200` and `{ "allowed": true|false, "reason": "..." }`.
+
+The LLM and API key stay on your backend; the CLI never sees them.
 
 ## CI examples
 
@@ -146,7 +239,9 @@ node packages/decern-gate/dist/bin.js
 
 - `Changed files: N`
 - `Decision required: YES` or `NO` + reason
-- `Found decision refs: id1, id2` or `none`
-- `Validation result: OK (...)` or `FAIL for <id> — <reason>`
+- `References: found N ref(s) — id1, id2` or `none`
+- Per-decision validate result: `Decision <id>: valid.` or `FAIL — <reason>`
+- If judge enabled: `Judge: checking diff against decision <ref>...`, optional warnings for excluded/truncated diff, then `Judge: allowed.` or `Gate: blocked — judge: <reason>`
+- `Gate: passed.` or `Gate: blocked — ...`
 
-Exit 0 only when either decision is not required, or at least one referenced decision is validated as approved.
+Exit 0 only when: (1) no high-impact patterns matched, or (2) at least one referenced decision is validated as approved **and** (if judge is enabled) the judge returns `allowed: true`.
