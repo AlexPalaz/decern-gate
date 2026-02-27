@@ -19,3 +19,12 @@ Il file **`uml.puml`** contiene i diagrammi UML dell’applicazione in formato [
 - **Online:** copia il contenuto di un singolo blocco `@startuml` … `@enduml` su [plantuml.com/plantuml](https://www.plantuml.com/plantuml/uml).
 
 Ogni blocco `@startuml nome` … `@enduml` è un diagramma separato; in molti viewer puoi scegliere quale renderizzare.
+
+### Mappa concettuale (Mermaid)
+
+La **mappa concettuale** del flusso decern-gate è in [mappa-concettuale.md](./mappa-concettuale.md). Sono disponibili:
+
+- **Immagine PNG:** [mappa-concettuale.png](./mappa-concettuale.png) — generata con `npm run docs:diagram` (usa `@mermaid-js/mermaid-cli`).
+- **Sorgente:** [mappa-concettuale.mermaid](./mappa-concettuale.mermaid).
+
+**Rigenerare il PNG:** `npm run docs:diagram`. Su macOS lo script usa il Chrome di sistema se presente; altrimenti installa il browser per Puppeteer una tantum: `npx puppeteer browsers install chrome-headless-shell`.

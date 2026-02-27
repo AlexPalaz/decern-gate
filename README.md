@@ -37,16 +37,19 @@ npx decern-gate
 | `DECERN_CI_TOKEN` | Yes (when decision required) | CI token for the workspace (from Decern Dashboard → Workspace → Token CI). Never logged. |
 | `DECERN_GATE_TIMEOUT_MS` | No | Timeout for the validate API call in ms. Default: `5000`. |
 | `DECERN_VALIDATE_PATH` | No | Path to the validate endpoint. Default: `/api/decision-gate/validate`. |
-| `DECERN_GATE_REQUIRE_LINKED_PR` | No | When `true` or `1`, the gate blocks unless the decision has this PR linked in Decern (validate API must return `hasLinkedPR: true`). If the API does not return `hasLinkedPR`, the gate blocks and suggests linking the PR or updating the API. |
+| `DECERN_GATE_REQUIRE_LINKED_PR` | No | When `true` or `1`, the CLI sends `requireLinkedPR=true` to the validate API. The API returns `422` `linked_pr_required` if the decision has no linked PR; otherwise the gate passes. |
 | `DECERN_GATE_EXTRA_PATTERNS` | No | Comma-separated list of extra path/basename patterns that require a decision. Paths (containing `/`) match if the file path includes the string (e.g. `my-app/config/`); otherwise treated as basename exact match (e.g. `secret.conf`). Example: `DECERN_GATE_EXTRA_PATTERNS=internal/,config/prod.json`. |
 | `CI_BASE_SHA` | No | Base commit for diff (e.g. target branch). |
 | `CI_HEAD_SHA` | No | Head commit for diff (e.g. current branch). |
 | `CI_PR_TITLE` | No | PR/MR title; used to extract `decern:<id>` if set. |
 | `CI_PR_BODY` | No | PR/MR description; used to extract decision refs. |
 | `CI_COMMIT_MESSAGE` | No | Full commit message; used if PR vars are not set. |
-| `DECERN_GATE_JUDGE_ENABLED` | No | When `true` or `1`, the judge step runs after validate. Default: disabled. Set to `true` once your Decern backend exposes the judge endpoint. |
+| `DECERN_GATE_JUDGE_ENABLED` | No | When `true` or `1`, the judge step runs after validate. Default: disabled. Requires LLM env vars below (BYO LLM). |
 | `DECERN_JUDGE_PATH` | No | Path to the judge endpoint. Default: `/api/decision-gate/judge`. |
 | `DECERN_GATE_JUDGE_TIMEOUT_MS` | No | Timeout for the judge API call in ms. Default: `60000`. |
+| `DECERN_JUDGE_LLM_BASE_URL` | Yes (when judge enabled) | LLM API base URL (e.g. `https://api.openai.com/v1`, `https://api.anthropic.com`). Never logged. |
+| `DECERN_JUDGE_LLM_API_KEY` | Yes (when judge enabled) | API key for the LLM. Used only for the judge request, never stored or logged. |
+| `DECERN_JUDGE_LLM_MODEL` | Yes (when judge enabled) | Model name (e.g. `gpt-4o-mini`, `claude-3-5-sonnet-20241022`). |
 
 If `CI_BASE_SHA` and `CI_HEAD_SHA` are not set, the CLI tries `origin/main...HEAD`, then `origin/master...HEAD`, then `HEAD~1...HEAD`.
 
@@ -90,8 +93,8 @@ Response when approved: `200` with `{"valid":true,"decisionId":"...","status":"a
 1. **Changed files** — `git diff --name-only base...head`.
 2. **Policy** — If any file matches high-impact patterns (migrations, Dockerfile, lockfiles, workflows, etc.), a decision is **required**.
 3. **Extract refs** — From PR title/body or commit message: `decern:<id>`, `DECERN-<id>`, or URLs containing `/decisions/<id>`. If multiple refs are present, only the **last** one is used for the judge step.
-4. **Validate** — Calls `GET ${DECERN_BASE_URL}/api/decision-gate/validate?decisionId=<id>` (or `adrRef=...`) with `Authorization: Bearer ${DECERN_CI_TOKEN}`. If no referenced decision is approved, the gate blocks and the judge step is **not** run.
-5. **Judge** (optional, when `DECERN_GATE_JUDGE_ENABLED` is set to `true`) — After validate passes, calls `POST ${DECERN_BASE_URL}${DECERN_JUDGE_PATH}` with the **full diff** (subject to exclusions and a 2MB cap; see [Judge (LLM as a judge)](#judge-llm-as-a-judge)) and the single decision ref (ADR or decision ID). The backend uses an LLM to decide whether the diff is consistent with the decision. If the judge does not allow the change, the gate blocks.
+4. **Validate** — Calls `GET ${DECERN_BASE_URL}/api/decision-gate/validate?decisionId=<id>` (or `adrRef=...`) with `Authorization: Bearer ${DECERN_CI_TOKEN}`. The CLI sends `highImpact=true` (so on Team plan the API enforces approval) and, when `DECERN_GATE_REQUIRE_LINKED_PR` is set, `requireLinkedPR=true`. If no referenced decision is approved (or linked PR required but missing), the gate blocks and the judge step is **not** run.
+5. **Judge** (optional, when `DECERN_GATE_JUDGE_ENABLED` is set to `true`) — After validate passes, calls `POST ${DECERN_BASE_URL}${DECERN_JUDGE_PATH}` with the **full diff** (subject to exclusions and a 2MB cap; see [Judge (LLM as a judge)](#judge-llm-as-a-judge)), the single decision ref (ADR or decision ID), and the **LLM config** (BYO: `DECERN_JUDGE_LLM_*`). The backend uses that LLM to decide whether the diff is consistent with the decision. If the judge returns `allowed: false` and the response is not **advisory**, the gate blocks.
 
 **Fail-closed:** Timeout, network error, or 5xx → exit 1. Never log the token.
 
@@ -111,14 +114,15 @@ decern-gate works with a **trunk-based** workflow (single main branch, direct pu
 
 ## Judge (LLM as a judge)
 
-When validate passes and the judge is **enabled** (`DECERN_GATE_JUDGE_ENABLED=true`), the CLI calls a **judge** endpoint so that the Decern backend (or your service) uses an LLM to check whether the **diff is consistent with** the referenced decision. The judge is **disabled by default**; the judge runs only after validate, and if validate fails, the CI is blocked and the judge is never called.
+When validate passes and the judge is **enabled** (`DECERN_GATE_JUDGE_ENABLED=true`), the CLI calls a **judge** endpoint so that the Decern backend uses an LLM to check whether the **diff is consistent with** the referenced decision. The judge is **BYO LLM**: you set `DECERN_JUDGE_LLM_BASE_URL`, `DECERN_JUDGE_LLM_API_KEY`, and `DECERN_JUDGE_LLM_MODEL`; the CLI sends them in the request body and the backend uses them only for that request (keys are never stored). The judge is **disabled by default**; the judge runs only after validate, and if validate fails, the CI is blocked and the judge is never called.
 
 ### Flow
 
 1. **Validate** — High-impact change detected and at least one decision ref present. CLI calls validate; if `valid` is not `true`, gate blocks and **judge is not called**.
-2. **Build diff** — CLI builds the full `git diff base...head` with exclusions and cap (see below).
-3. **Call judge** — `POST` to `DECERN_JUDGE_PATH` with the payload below. One decision only: if multiple refs were found (e.g. ADR-001 and ADR-002), the **last** one (e.g. ADR-002) is sent.
-4. **Result** — Backend returns `allowed: true` or `allowed: false` with optional `reason`. Gate passes only when `allowed === true`.
+2. **Check LLM env** — If judge is enabled but any of `DECERN_JUDGE_LLM_BASE_URL`, `DECERN_JUDGE_LLM_API_KEY`, or `DECERN_JUDGE_LLM_MODEL` is missing, the gate blocks with a clear error.
+3. **Build diff** — CLI builds the full `git diff base...head` with exclusions and cap (see below).
+4. **Call judge** — `POST` to `DECERN_JUDGE_PATH` with the payload below (including the `llm` object). One decision only: if multiple refs were found (e.g. ADR-001 and ADR-002), the **last** one (e.g. ADR-002) is sent.
+5. **Result** — Backend returns `allowed`, optional `reason`, and optional `advisory`. If `advisory === true` and `allowed === false`, the CLI does **not** block (logs a warning and passes). Otherwise, gate passes only when `allowed === true`.
 
 ### Payload sent to the judge API
 
@@ -135,6 +139,7 @@ When validate passes and the judge is **enabled** (`DECERN_GATE_JUDGE_ENABLED=tr
 | `headSha` | string | Git head ref (e.g. `HEAD` or a commit SHA). |
 | `adrRef` | string | **Exactly one of** `adrRef` or `decisionId` is present. ADR reference (e.g. `ADR-002`). |
 | `decisionId` | string | Decision UUID when the ref is not an ADR. |
+| `llm` | object | **Required.** Your LLM config (from env): `baseUrl`, `apiKey`, `model`. Never stored by the backend. |
 
 **Exclusions applied by the CLI before sending:**
 
@@ -150,41 +155,43 @@ Example request body:
   "truncated": false,
   "baseSha": "origin/main",
   "headSha": "HEAD",
-  "adrRef": "ADR-002"
+  "adrRef": "ADR-002",
+  "llm": {
+    "baseUrl": "https://api.openai.com/v1",
+    "apiKey": "sk-...",
+    "model": "gpt-4o-mini"
+  }
 }
 ```
 
 ### Response expected from the judge API
 
-- **Status:** `200 OK`.
+- **Status:** `200 OK` (even when the gate would block; blocking is indicated by `allowed: false`).
 - **Body (JSON):**
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `allowed` | boolean | `true` if the change is considered consistent with the decision; `false` to block the gate. |
+| `allowed` | boolean | `true` if the change is considered consistent with the decision; `false` otherwise. |
 | `reason` | string (optional) | Short explanation (e.g. for logs or CI output). |
+| `advisory` | boolean (optional) | When `true`, the result is advisory only: the CLI **must not** block on `allowed: false`. When absent or `false`, the CLI may block. |
 
-Example success: `{"allowed": true, "reason": "Change aligns with ADR-002."}`  
-Example block: `{"allowed": false, "reason": "Diff introduces a new DB column not mentioned in the decision."}`
+Example success: `{"allowed": true, "reason": "Change aligns with ADR-002.", "advisory": true}`  
+Example block (can block CI): `{"allowed": false, "reason": "Diff introduces a new DB column not mentioned in the decision."}`  
+Example advisory (do not block): `{"allowed": false, "reason": "...", "advisory": true}` — CLI logs a warning and passes.
 
 On non-2xx or network error, the CLI treats the judge as failed and **blocks** the gate (fail-closed).
 
-If the backend returns `allowed: false` with a reason indicating the judge feature is not available for the current plan (e.g. “Judge is available on Team plan and above.”), the CLI **does not block**: it logs the reason as a warning and passes the gate.
+If the backend returns `allowed: false` with `advisory: true`, or with a reason indicating the judge is not available for the plan, the CLI **does not block**: it logs a warning and passes the gate.
 
 ### Backend implementation guide (Decern or your service)
 
-The endpoint that receives the judge payload should:
+The endpoint receives the judge payload including the **`llm`** object (user's BYO config). It should:
 
 1. **Authenticate** — Verify `Authorization: Bearer <DECERN_CI_TOKEN>`.
 2. **Resolve the decision** — Using `adrRef` or `decisionId`, load the decision content (title, body, conclusion) from your store.
-3. **Run the LLM judge** — Prompt the model with the decision text and the `diff`. Ask for a structured verdict: e.g. “Is this diff consistent with and justified by this decision? Reply with JSON: `{\"allowed\": true|false, \"reason\": \"...\"}`.”
-4. **Handle large diffs** — The payload is already capped at 2 MB and may be marked `truncated: true`. Recommended strategies:
-   - **Single-shot with truncation:** If the diff fits your model’s context window, send it as-is. If `truncated` is true, you may add a note in the prompt that the diff was truncated.
-   - **Summarize then judge:** If the diff is very long, first call the LLM to produce a short summary (files changed, nature of changes), then a second call to judge “decision + summary” and return `allowed` + `reason`.
-   - **Fail-closed** — On LLM timeout, error, or invalid response, return `allowed: false` with a reason (e.g. “Judge unavailable”).
-5. **Return** — Respond with `200` and `{ "allowed": true|false, "reason": "..." }`.
-
-The LLM and API key stay on your backend; the CLI never sees them.
+3. **Run the LLM judge** — Use the provided `llm.baseUrl`, `llm.apiKey`, and `llm.model` for this request only (never store or log the key). Call the LLM (Anthropic native or OpenAI-compatible per `baseUrl`), prompt with the decision text and the `diff`, and get a structured verdict (`allowed`, `reason`).
+4. **Handle large diffs** — The payload is already capped at 2 MB and may be marked `truncated: true`. Use truncation or summarize-then-judge as needed. Fail-closed: on LLM timeout or error, return `200` with `allowed: false` and a reason.
+5. **Return** — Respond with `200` and `{ "allowed": true|false, "reason": "...", "advisory": true }` when the plan or workspace policy is advisory-only; omit `advisory` or set `false` when the client may block.
 
 ## CI examples
 

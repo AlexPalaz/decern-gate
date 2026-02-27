@@ -33,10 +33,15 @@ const DECERN_GATE_JUDGE_ENABLED =
   process.env.DECERN_GATE_JUDGE_ENABLED?.toLowerCase() === "true" ||
   process.env.DECERN_GATE_JUDGE_ENABLED === "1";
 
-/** When true, gate blocks unless the decision has the current PR linked in Decern (requires API to return hasLinkedPR). */
+/** When true, CLI sends requireLinkedPR=true to validate API; API returns 422 linked_pr_required if decision has no linked PR. */
 const DECERN_GATE_REQUIRE_LINKED_PR =
   process.env.DECERN_GATE_REQUIRE_LINKED_PR?.toLowerCase() === "true" ||
   process.env.DECERN_GATE_REQUIRE_LINKED_PR === "1";
+
+/** Judge BYO LLM: required when judge is enabled. Never logged. */
+const DECERN_JUDGE_LLM_BASE_URL = process.env.DECERN_JUDGE_LLM_BASE_URL?.trim();
+const DECERN_JUDGE_LLM_API_KEY = process.env.DECERN_JUDGE_LLM_API_KEY?.trim();
+const DECERN_JUDGE_LLM_MODEL = process.env.DECERN_JUDGE_LLM_MODEL?.trim();
 
 /** Extra path/basename patterns from env (comma-separated). Paths contain "/" and match via includes; otherwise basename exact match. */
 const DECERN_GATE_EXTRA_PATTERNS = (process.env.DECERN_GATE_EXTRA_PATTERNS ?? "")
@@ -85,7 +90,7 @@ function isAdrRef(ref: string): boolean {
 
 type JudgeResult =
   | { ok: true; allowed: true; reason?: string }
-  | { ok: true; allowed: false; reason: string }
+  | { ok: true; allowed: false; reason: string; advisory?: boolean }
   | { ok: false; status: number; reason: string };
 
 async function callJudge(params: {
@@ -98,6 +103,13 @@ async function callJudge(params: {
   if (!DECERN_BASE_URL || !DECERN_CI_TOKEN) {
     return { ok: false, status: 0, reason: "DECERN_BASE_URL and DECERN_CI_TOKEN are required." };
   }
+  if (!DECERN_JUDGE_LLM_BASE_URL || !DECERN_JUDGE_LLM_API_KEY || !DECERN_JUDGE_LLM_MODEL) {
+    return {
+      ok: false,
+      status: 0,
+      reason: "Judge is enabled but DECERN_JUDGE_LLM_BASE_URL, DECERN_JUDGE_LLM_API_KEY, or DECERN_JUDGE_LLM_MODEL is missing.",
+    };
+  }
 
   const base = DECERN_BASE_URL.replace(/\/$/, "");
   const url = new URL(JUDGE_PATH.startsWith("/") ? JUDGE_PATH : `/${JUDGE_PATH}`, `${base}/`);
@@ -107,6 +119,11 @@ async function callJudge(params: {
     truncated: params.truncated,
     baseSha: params.baseSha,
     headSha: params.headSha,
+    llm: {
+      baseUrl: DECERN_JUDGE_LLM_BASE_URL,
+      apiKey: DECERN_JUDGE_LLM_API_KEY,
+      model: DECERN_JUDGE_LLM_MODEL,
+    },
   };
   if (isAdrRef(params.decisionRef)) {
     body.adrRef = params.decisionRef.trim();
@@ -132,6 +149,7 @@ async function callJudge(params: {
     const data = (await res.json().catch(() => ({}))) as {
       allowed?: boolean;
       reason?: string;
+      advisory?: boolean;
     };
 
     if (res.status !== 200) {
@@ -146,6 +164,7 @@ async function callJudge(params: {
       ok: true,
       allowed: false,
       reason: data.reason ?? "Judge did not allow the change.",
+      advisory: data.advisory,
     };
   } catch (e) {
     clearTimeout(timeoutId);
@@ -197,7 +216,7 @@ function getPrOrCommitText(): string {
 // --- Validate: call API ---
 
 type ValidateResult =
-  | { ok: true; decisionStatus?: string; hasLinkedPR?: boolean }
+  | { ok: true; decisionStatus?: string; observationsExhausted?: boolean }
   | { ok: false; status: number; reason: string; body?: unknown };
 
 async function validateRef(ref: string): Promise<ValidateResult> {
@@ -211,6 +230,11 @@ async function validateRef(ref: string): Promise<ValidateResult> {
     url.searchParams.set("adrRef", ref.trim());
   } else {
     url.searchParams.set("decisionId", ref.trim());
+  }
+  // Decision required = high-impact run; on Team plan this enables blocking (require approved).
+  url.searchParams.set("highImpact", "true");
+  if (DECERN_GATE_REQUIRE_LINKED_PR) {
+    url.searchParams.set("requireLinkedPR", "true");
   }
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), DECERN_GATE_TIMEOUT_MS);
@@ -227,13 +251,17 @@ async function validateRef(ref: string): Promise<ValidateResult> {
       valid?: boolean;
       reason?: string;
       status?: string;
-      hasLinkedPR?: boolean;
+      observation?: boolean;
+      message?: string;
     };
     if (res.status === 200 && body.valid === true) {
+      // Free plan: when observation limit (7) exceeded, status is omitted and message suggests upgrade.
+      const observationsExhausted =
+        body.observation === true && body.status === undefined;
       return {
         ok: true,
         decisionStatus: body.status,
-        hasLinkedPR: body.hasLinkedPR,
+        observationsExhausted,
       };
     }
     const rawReason = body.reason ?? `HTTP ${res.status}`;
@@ -354,26 +382,11 @@ export async function run(): Promise<number> {
       } else {
         log(`Decision ${id}: valid.`);
       }
-      if (result.hasLinkedPR != null) {
-        log(`Linked PR: ${result.hasLinkedPR ? "yes" : "no"}.`);
-      }
-
-      if (DECERN_GATE_REQUIRE_LINKED_PR) {
-        if (result.hasLinkedPR === undefined) {
-          log("");
-          log(`Gate: blocked — DECERN_GATE_REQUIRE_LINKED_PR is set but the API did not return hasLinkedPR for decision ${id}. Link the PR to the decision in Decern, or ensure the validate API includes hasLinkedPR in the response.`);
-          if (DECERN_BASE_URL) {
-            log(`Dashboard: ${DECERN_BASE_URL}`);
-          }
-          return 1;
-        }
-        if (result.hasLinkedPR !== true) {
-          log("");
-          log("Gate: blocked — this PR must be linked to the decision in Decern (DECERN_GATE_REQUIRE_LINKED_PR is set).");
-          if (DECERN_BASE_URL) {
-            log(`Dashboard: ${DECERN_BASE_URL}`);
-          }
-          return 1;
+      if (result.observationsExhausted) {
+        log("");
+        log("Warning: observation limit reached on the Free plan. Consider upgrading to Pro for full decision-gate functionality.");
+        if (DECERN_BASE_URL) {
+          log(`Upgrade: ${DECERN_BASE_URL}`);
         }
       }
 
@@ -382,6 +395,16 @@ export async function run(): Promise<number> {
         log("");
         log("Gate: passed.");
         return 0;
+      }
+
+      const missingJudgeEnv = [];
+      if (!DECERN_JUDGE_LLM_BASE_URL) missingJudgeEnv.push("DECERN_JUDGE_LLM_BASE_URL");
+      if (!DECERN_JUDGE_LLM_API_KEY) missingJudgeEnv.push("DECERN_JUDGE_LLM_API_KEY");
+      if (!DECERN_JUDGE_LLM_MODEL) missingJudgeEnv.push("DECERN_JUDGE_LLM_MODEL");
+      if (missingJudgeEnv.length > 0) {
+        log("");
+        log(`Gate: blocked — judge is enabled but missing env: ${missingJudgeEnv.join(", ")}. Set them to use BYO LLM for the judge step.`);
+        return 1;
       }
 
       const lastRef = ids[ids.length - 1]!;
@@ -414,6 +437,12 @@ export async function run(): Promise<number> {
         return 1;
       }
       if (!judgeResult.allowed) {
+        if (judgeResult.advisory === true) {
+          log("");
+          log(`Warning: judge (advisory) — ${judgeResult.reason}`);
+          log("Gate: passed.");
+          return 0;
+        }
         const r = (judgeResult.reason ?? "").toLowerCase();
         const judgeUnavailable =
           r.includes("team plan") ||
