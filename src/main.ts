@@ -43,6 +43,15 @@ const DECERN_JUDGE_LLM_BASE_URL = process.env.DECERN_JUDGE_LLM_BASE_URL?.trim();
 const DECERN_JUDGE_LLM_API_KEY = process.env.DECERN_JUDGE_LLM_API_KEY?.trim();
 const DECERN_JUDGE_LLM_MODEL = process.env.DECERN_JUDGE_LLM_MODEL?.trim();
 
+/** Optional min confidence (0–1). If set, gate blocks when judge returns allowed but confidence below this. */
+const DECERN_JUDGE_MIN_CONFIDENCE = (() => {
+  const v = process.env.DECERN_JUDGE_MIN_CONFIDENCE?.trim();
+  if (!v) return undefined;
+  const n = parseFloat(v);
+  if (!Number.isFinite(n) || n < 0 || n > 1) return undefined;
+  return n;
+})();
+
 /** Extra path/basename patterns from env (comma-separated). Paths contain "/" and match via includes; otherwise basename exact match. */
 const DECERN_GATE_EXTRA_PATTERNS = (process.env.DECERN_GATE_EXTRA_PATTERNS ?? "")
   .split(",")
@@ -89,8 +98,8 @@ function isAdrRef(ref: string): boolean {
 // --- Judge: call API (after validate passes) ---
 
 type JudgeResult =
-  | { ok: true; allowed: true; reason?: string }
-  | { ok: true; allowed: false; reason: string; advisory?: boolean }
+  | { ok: true; allowed: true; reason?: string; confidence?: number; advisoryMessage?: string }
+  | { ok: true; allowed: false; reason: string; advisory?: boolean; confidence?: number }
   | { ok: false; status: number; reason: string };
 
 async function callJudge(params: {
@@ -150,6 +159,8 @@ async function callJudge(params: {
       allowed?: boolean;
       reason?: string;
       advisory?: boolean;
+      confidence?: number;
+      advisoryMessage?: string;
     };
 
     if (res.status !== 200) {
@@ -157,14 +168,28 @@ async function callJudge(params: {
       return { ok: false, status: res.status, reason };
     }
 
+    const confidence =
+      typeof data.confidence === "number" && Number.isFinite(data.confidence)
+        ? data.confidence > 1
+          ? data.confidence / 100
+          : data.confidence
+        : undefined;
+
     if (data.allowed === true) {
-      return { ok: true, allowed: true, reason: data.reason };
+      return {
+        ok: true,
+        allowed: true,
+        reason: data.reason,
+        confidence,
+        advisoryMessage: typeof data.advisoryMessage === "string" ? data.advisoryMessage : undefined,
+      };
     }
     return {
       ok: true,
       allowed: false,
       reason: data.reason ?? "Judge did not allow the change.",
       advisory: data.advisory,
+      confidence,
     };
   } catch (e) {
     clearTimeout(timeoutId);
@@ -459,7 +484,31 @@ export async function run(): Promise<number> {
         return 1;
       }
 
-      log(`Judge: allowed. ${judgeResult.reason ? judgeResult.reason : ""}`);
+      if (
+        DECERN_JUDGE_MIN_CONFIDENCE != null &&
+        judgeResult.confidence != null &&
+        judgeResult.confidence < DECERN_JUDGE_MIN_CONFIDENCE
+      ) {
+        const pct = Math.round(judgeResult.confidence * 100);
+        const minPct = Math.round(DECERN_JUDGE_MIN_CONFIDENCE * 100);
+        log("");
+        log(`Gate: blocked — judge confidence ${pct}% is below DECERN_JUDGE_MIN_CONFIDENCE (${minPct}%).`);
+        if (judgeResult.advisoryMessage) {
+          log(`Advisory: ${judgeResult.advisoryMessage}`);
+        }
+        return 1;
+      }
+
+      const confidencePct =
+        judgeResult.confidence != null ? Math.round(judgeResult.confidence * 100) : null;
+      const allowedLine =
+        confidencePct != null
+          ? `Judge: allowed. Passed at ${confidencePct}%${judgeResult.reason ? `. ${judgeResult.reason}` : ""}`
+          : `Judge: allowed. ${judgeResult.reason ? judgeResult.reason : ""}`;
+      log(allowedLine);
+      if (judgeResult.advisoryMessage) {
+        log(`Advisory: ${judgeResult.advisoryMessage}`);
+      }
       log("");
       log("Gate: passed.");
       return 0;

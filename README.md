@@ -50,6 +50,7 @@ npx decern-gate
 | `DECERN_JUDGE_LLM_BASE_URL` | Yes (when judge enabled) | LLM API base URL (e.g. `https://api.openai.com/v1`, `https://api.anthropic.com`). Never logged. |
 | `DECERN_JUDGE_LLM_API_KEY` | Yes (when judge enabled) | API key for the LLM. Used only for the judge request, never stored or logged. |
 | `DECERN_JUDGE_LLM_MODEL` | Yes (when judge enabled) | Model name (e.g. `gpt-4o-mini`, `claude-3-5-sonnet-20241022`). |
+| `DECERN_JUDGE_MIN_CONFIDENCE` | No | Min confidence (0–1, e.g. `0.8` = 80%). If set, the gate blocks when the judge returns `allowed: true` but `confidence` is below this value. Omit to accept the backend threshold. |
 
 If `CI_BASE_SHA` and `CI_HEAD_SHA` are not set, the CLI tries `origin/main...HEAD`, then `origin/master...HEAD`, then `HEAD~1...HEAD`.
 
@@ -171,11 +172,14 @@ Example request body:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `allowed` | boolean | `true` if the change is considered consistent with the decision; `false` otherwise. |
+| `allowed` | boolean | `true` if the change meets the confidence threshold; `false` otherwise. |
 | `reason` | string (optional) | Short explanation (e.g. for logs or CI output). |
 | `advisory` | boolean (optional) | When `true`, the result is advisory only: the CLI **must not** block on `allowed: false`. When absent or `false`, the CLI may block. |
+| `confidence` | number (optional) | Score 0–1 from the judge (e.g. 0.85 = 85%). The CLI shows “Passed at X%” and can enforce `DECERN_JUDGE_MIN_CONFIDENCE` if set. |
+| `advisoryMessage` | string (optional) | When `allowed: true` but confidence &lt; 100%, a short note on what was not fully aligned. The CLI shows “Advisory: …”. |
 
-Example success: `{"allowed": true, "reason": "Change aligns with ADR-002.", "advisory": true}`  
+Example success: `{"allowed": true, "reason": "Change aligns with ADR-002.", "advisory": true, "confidence": 1}`  
+Example pass with advisory: `{"allowed": true, "reason": "Change aligns.", "advisory": true, "confidence": 0.85, "advisoryMessage": "Error handling could better match the decision."}` — CLI shows “Passed at 85%” and the advisory message.  
 Example block (can block CI): `{"allowed": false, "reason": "Diff introduces a new DB column not mentioned in the decision."}`  
 Example advisory (do not block): `{"allowed": false, "reason": "...", "advisory": true}` — CLI logs a warning and passes.
 
