@@ -185,7 +185,7 @@ Example advisory (do not block): `{"allowed": false, "reason": "...", "advisory"
 
 On non-2xx or network error, the CLI treats the judge as failed and **blocks** the gate (fail-closed).
 
-If the backend returns `allowed: false` with `advisory: true`, or with a reason indicating the judge is not available for the plan, the CLI **does not block**: it logs a warning and passes the gate.
+If the backend returns `allowed: false` with `advisory: true`, the CLI **does not block**: it logs a warning and passes the gate. On **Free** the judge is always advisory; on **Team** and **Business+** the judge can block (when workspace policy "Judge blocking" is on, which is the default).
 
 ### Backend implementation guide (Decern or your service)
 

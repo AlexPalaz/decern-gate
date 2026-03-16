@@ -468,17 +468,6 @@ export async function run(): Promise<number> {
           log("Gate: passed.");
           return 0;
         }
-        const r = (judgeResult.reason ?? "").toLowerCase();
-        const judgeUnavailable =
-          r.includes("team plan") ||
-          r.includes("plan and above") ||
-          (r.includes("judge") && r.includes("available") && r.includes("plan"));
-        if (judgeUnavailable) {
-          log("");
-          log(`Warning: judge skipped — ${judgeResult.reason}`);
-          log("Gate: passed.");
-          return 0;
-        }
         log("");
         log(`Gate: blocked — judge: ${judgeResult.reason}`);
         return 1;
