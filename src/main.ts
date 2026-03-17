@@ -33,11 +33,6 @@ const DECERN_GATE_JUDGE_ENABLED =
   process.env.DECERN_GATE_JUDGE_ENABLED?.toLowerCase() === "true" ||
   process.env.DECERN_GATE_JUDGE_ENABLED === "1";
 
-/** When true, CLI sends requireLinkedPR=true to validate API; API returns 422 linked_pr_required if decision has no linked PR. */
-const DECERN_GATE_REQUIRE_LINKED_PR =
-  process.env.DECERN_GATE_REQUIRE_LINKED_PR?.toLowerCase() === "true" ||
-  process.env.DECERN_GATE_REQUIRE_LINKED_PR === "1";
-
 /** Judge BYO LLM: required when judge is enabled. Never logged. */
 const DECERN_JUDGE_LLM_BASE_URL = process.env.DECERN_JUDGE_LLM_BASE_URL?.trim();
 const DECERN_JUDGE_LLM_API_KEY = process.env.DECERN_JUDGE_LLM_API_KEY?.trim();
@@ -252,9 +247,6 @@ async function validateRef(ref: string): Promise<ValidateResult> {
   }
   // Decision required = high-impact run; on Team plan this enables blocking (require approved).
   url.searchParams.set("highImpact", "true");
-  if (DECERN_GATE_REQUIRE_LINKED_PR) {
-    url.searchParams.set("requireLinkedPR", "true");
-  }
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), DECERN_GATE_TIMEOUT_MS);
 

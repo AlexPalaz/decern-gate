@@ -37,7 +37,6 @@ npx decern-gate
 | `DECERN_CI_TOKEN` | Yes (when decision required) | CI token for the workspace (from Decern Dashboard → Workspace → Token CI). Never logged. |
 | `DECERN_GATE_TIMEOUT_MS` | No | Timeout for the validate API call in ms. Default: `5000`. |
 | `DECERN_VALIDATE_PATH` | No | Path to the validate endpoint. Default: `/api/decision-gate/validate`. |
-| `DECERN_GATE_REQUIRE_LINKED_PR` | No | When `true` or `1`, the CLI sends `requireLinkedPR=true` to the validate API. The API returns `422` `linked_pr_required` if the decision has no linked PR; otherwise the gate passes. |
 | `DECERN_GATE_EXTRA_PATTERNS` | No | Comma-separated list of extra path/basename patterns that require a decision. Paths (containing `/`) match if the file path includes the string (e.g. `my-app/config/`); otherwise treated as basename exact match (e.g. `secret.conf`). Example: `DECERN_GATE_EXTRA_PATTERNS=internal/,config/prod.json`. |
 | `CI_BASE_SHA` | No | Base commit for diff (e.g. target branch). |
 | `CI_HEAD_SHA` | No | Head commit for diff (e.g. current branch). |
@@ -94,7 +93,7 @@ Response when approved: `200` with `{"valid":true,"decisionId":"...","status":"a
 1. **Changed files** — `git diff --name-only base...head`.
 2. **Policy** — If any file matches high-impact patterns (migrations, Dockerfile, lockfiles, workflows, etc.), a decision is **required**.
 3. **Extract refs** — From PR title/body or commit message: `decern:<id>`, `DECERN-<id>`, or URLs containing `/decisions/<id>`. If multiple refs are present, only the **last** one is used for the judge step.
-4. **Validate** — Calls `GET ${DECERN_BASE_URL}/api/decision-gate/validate?decisionId=<id>` (or `adrRef=...`) with `Authorization: Bearer ${DECERN_CI_TOKEN}`. The CLI sends `highImpact=true` (so on Team plan the API enforces approval) and, when `DECERN_GATE_REQUIRE_LINKED_PR` is set, `requireLinkedPR=true`. If no referenced decision is approved (or linked PR required but missing), the gate blocks and the judge step is **not** run.
+4. **Validate** — Calls `GET ${DECERN_BASE_URL}/api/decision-gate/validate?decisionId=<id>` (or `adrRef=...`) with `Authorization: Bearer ${DECERN_CI_TOKEN}`. The CLI sends `highImpact=true` (so on Team plan the API enforces approval). If no referenced decision is approved, the gate blocks and the judge step is **not** run.
 5. **Judge** (optional, when `DECERN_GATE_JUDGE_ENABLED` is set to `true`) — After validate passes, calls `POST ${DECERN_BASE_URL}${DECERN_JUDGE_PATH}` with the **full diff** (subject to exclusions and a 2MB cap; see [Judge (LLM as a judge)](#judge-llm-as-a-judge)), the single decision ref (ADR or decision ID), and the **LLM config** (BYO: `DECERN_JUDGE_LLM_*`). The backend uses that LLM to decide whether the diff is consistent with the decision. If the judge returns `allowed: false` and the response is not **advisory**, the gate blocks.
 
 **Fail-closed:** Timeout, network error, or 5xx → exit 1. Never log the token.
