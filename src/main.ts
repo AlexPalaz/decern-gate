@@ -112,14 +112,6 @@ async function callJudge(params: {
   if (!DECERN_BASE_URL || !DECERN_CI_TOKEN) {
     return { ok: false, status: 0, reason: "DECERN_BASE_URL and DECERN_CI_TOKEN are required." };
   }
-  if (!DECERN_JUDGE_LLM_BASE_URL || !DECERN_JUDGE_LLM_API_KEY || !DECERN_JUDGE_LLM_MODEL) {
-    return {
-      ok: false,
-      status: 0,
-      reason: "Judge is enabled but DECERN_JUDGE_LLM_BASE_URL, DECERN_JUDGE_LLM_API_KEY, or DECERN_JUDGE_LLM_MODEL is missing.",
-    };
-  }
-
   const base = DECERN_BASE_URL.replace(/\/$/, "");
   const url = new URL(JUDGE_PATH.startsWith("/") ? JUDGE_PATH : `/${JUDGE_PATH}`, `${base}/`);
 
@@ -128,12 +120,14 @@ async function callJudge(params: {
     truncated: params.truncated,
     baseSha: params.baseSha,
     headSha: params.headSha,
-    llm: {
+  };
+  if (DECERN_JUDGE_LLM_BASE_URL && DECERN_JUDGE_LLM_API_KEY && DECERN_JUDGE_LLM_MODEL) {
+    body.llm = {
       baseUrl: DECERN_JUDGE_LLM_BASE_URL,
       apiKey: DECERN_JUDGE_LLM_API_KEY,
       model: DECERN_JUDGE_LLM_MODEL,
-    },
-  };
+    };
+  }
   if (isAdrRef(params.decisionRef)) {
     body.adrRef = params.decisionRef.trim();
   } else {
@@ -422,14 +416,9 @@ export async function run(): Promise<number> {
         return 0;
       }
 
-      const missingJudgeEnv = [];
-      if (!DECERN_JUDGE_LLM_BASE_URL) missingJudgeEnv.push("DECERN_JUDGE_LLM_BASE_URL");
-      if (!DECERN_JUDGE_LLM_API_KEY) missingJudgeEnv.push("DECERN_JUDGE_LLM_API_KEY");
-      if (!DECERN_JUDGE_LLM_MODEL) missingJudgeEnv.push("DECERN_JUDGE_LLM_MODEL");
-      if (missingJudgeEnv.length > 0) {
-        log("");
-        log(`Gate: blocked — judge is enabled but missing env: ${missingJudgeEnv.join(", ")}. Set them to use BYO LLM for the judge step.`);
-        return 1;
+      const isByoLlm = !!(DECERN_JUDGE_LLM_BASE_URL && DECERN_JUDGE_LLM_API_KEY && DECERN_JUDGE_LLM_MODEL);
+      if (!isByoLlm) {
+        log("Judge: no BYO LLM configured — using Decern fair-use LLM.");
       }
 
       const lastRef = ids[ids.length - 1]!;

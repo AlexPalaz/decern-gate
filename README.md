@@ -47,9 +47,9 @@ npx decern-gate
 | `DECERN_GATE_JUDGE_ENABLED` | No | When `true` or `1`, the judge step runs after validate. Default: disabled. Requires LLM env vars below (BYO LLM). |
 | `DECERN_JUDGE_PATH` | No | Path to the judge endpoint. Default: `/api/decision-gate/judge`. |
 | `DECERN_GATE_JUDGE_TIMEOUT_MS` | No | Timeout for the judge API call in ms. Default: `60000`. |
-| `DECERN_JUDGE_LLM_BASE_URL` | Yes (when judge enabled) | LLM API base URL (e.g. `https://api.openai.com/v1`, `https://api.anthropic.com`). Never logged. |
-| `DECERN_JUDGE_LLM_API_KEY` | Yes (when judge enabled) | API key for the LLM. Used only for the judge request, never stored or logged. |
-| `DECERN_JUDGE_LLM_MODEL` | Yes (when judge enabled) | Model name (e.g. `gpt-4o-mini`, `claude-3-5-sonnet-20241022`). |
+| `DECERN_JUDGE_LLM_BASE_URL` | No | BYO LLM: API base URL (e.g. `https://api.openai.com/v1`, `https://api.anthropic.com`). If all three `LLM_*` vars are omitted, Decern fair-use LLM is used. Never logged. |
+| `DECERN_JUDGE_LLM_API_KEY` | No | BYO LLM: API key. Used only for the judge request, never stored or logged. |
+| `DECERN_JUDGE_LLM_MODEL` | No | BYO LLM: model name (e.g. `gpt-4o-mini`, `claude-3-5-sonnet-20241022`). |
 | `DECERN_JUDGE_MIN_CONFIDENCE` | No | Min confidence (0–1, e.g. `0.8` = 80%). If set, the gate blocks when the judge returns `allowed: true` but `confidence` is below this value. Omit to accept the backend threshold. |
 
 If `CI_BASE_SHA` and `CI_HEAD_SHA` are not set, the CLI tries `origin/main...HEAD`, then `origin/master...HEAD`, then `HEAD~1...HEAD`.
