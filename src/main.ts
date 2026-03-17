@@ -245,8 +245,6 @@ async function validateRef(ref: string): Promise<ValidateResult> {
   } else {
     url.searchParams.set("decisionId", ref.trim());
   }
-  // Decision required = high-impact run; on Team plan this enables blocking (require approved).
-  url.searchParams.set("highImpact", "true");
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), DECERN_GATE_TIMEOUT_MS);
 
